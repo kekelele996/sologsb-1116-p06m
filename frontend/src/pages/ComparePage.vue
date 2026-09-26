@@ -7,6 +7,7 @@ import GillAttachmentTag from '@/components/common/GillAttachmentTag.vue'
 import SporePrintSwatch from '@/components/common/SporePrintSwatch.vue'
 import TraitsSummary from '@/components/common/TraitsSummary.vue'
 import { useStore } from '@/hooks/usePersistentStore'
+import { snapshotChanges } from '@/utils/identify'
 import { recordStore } from '@/stores/recordStore'
 import { sporeStore } from '@/stores/sporeStore'
 import { pointStore } from '@/stores/pointStore'
@@ -75,7 +76,10 @@ function pointName(pointId: string): string {
 
 function conclusionOf(recordId: string): string {
   const log = identifyState.logs.find((item) => item.recordId === recordId)
-  return log ? `${log.conclusion}（${log.confidence}${log.needReview ? '，待复核' : ''}）` : '尚无结论'
+  if (!log) return '尚无结论'
+  const stale = snapshotChanges(log, recordState.records, sporeState.spores).length > 0
+  const mark = stale ? '，依据已变更·待复核' : log.needReview ? '，待复核' : ''
+  return `${log.conclusion}（${log.confidence}${mark}）`
 }
 
 interface DiffRow {

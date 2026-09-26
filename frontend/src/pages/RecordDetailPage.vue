@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { computed, reactive, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
-import type { CollectPoint, SporeColor, SporePrint } from '@/types'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import type { CollectPoint, IdentifyLog, SporeColor, SporePrint } from '@/types'
 import { SPORE_COLORS } from '@/types'
 import GeoPointForm from '@/components/common/GeoPointForm.vue'
 import GillAttachmentTag from '@/components/common/GillAttachmentTag.vue'
 import SporePrintSwatch from '@/components/common/SporePrintSwatch.vue'
 import TraitsSummary from '@/components/common/TraitsSummary.vue'
 import { useStore } from '@/hooks/usePersistentStore'
+import { formatChange, snapshotChanges, snapshotOf } from '@/utils/identify'
 import { recordStore } from '@/stores/recordStore'
 import { sporeStore } from '@/stores/sporeStore'
 import { pointStore } from '@/stores/pointStore'
@@ -26,6 +27,12 @@ const identifyState = useStore(identifyStore)
 const record = computed(() => recordState.records.find((item) => item.id === route.params.id) ?? null)
 const spore = computed(() => sporeState.spores.find((item) => item.recordId === record.value?.id) ?? null)
 const logs = computed(() => identifyState.logs.filter((item) => item.recordId === record.value?.id))
+/** 最新一条结论（logs 已按日期倒序） */
+const latestLog = computed(() => logs.value[0] ?? null)
+/** 最新结论的依据变更项；非空时结论进入待复核，不再作为当前鉴定 */
+const latestChanges = computed(() =>
+  latestLog.value ? snapshotChanges(latestLog.value, recordState.records, sporeState.spores) : []
+)
 /** 当前条目所属采集点名称（在脚本内取，避免模板内箭头函数丢失空值收窄） */
 const recordPointName = computed(() => {
   const current = record.value
@@ -105,6 +112,23 @@ async function removeSpore(): Promise<void> {
   sporeForm.id = ''
   ElMessage.success('孢子印记录已删除')
 }
+
+/** 单条结论的依据变更项（空数组 = 观察值与落论时一致） */
+function changesOf(log: IdentifyLog) {
+  return snapshotChanges(log, recordState.records, sporeState.spores)
+}
+
+/** 复核确认：以当前观察值重落快照，结论恢复为当前鉴定 */
+async function confirmLog(log: IdentifyLog): Promise<void> {
+  if (!record.value) return
+  await ElMessageBox.confirm(
+    `以当前观察值复核确认结论「${log.conclusion}」？确认后该结论恢复为当前鉴定。`,
+    '复核确认',
+    { type: 'warning', confirmButtonText: '确认仍有效', cancelButtonText: '取消' }
+  )
+  await identifyStore.getState().save({ ...log, snapshot: snapshotOf(record.value, spore.value) })
+  ElMessage.success('已按当前观察值复核确认，结论恢复有效')
+}
 </script>
 
 <template>
@@ -129,6 +153,15 @@ async function removeSpore(): Promise<void> {
     </div>
 
     <template v-if="record">
+      <el-alert
+        v-if="latestChanges.length"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="block"
+        :title="`鉴定结论「${latestLog?.conclusion ?? ''}」的依据已变更，复核确认前不作为当前鉴定`"
+        :description="`变更项：${latestChanges.map(formatChange).join('；')}`"
+      />
       <el-card shadow="never" class="block">
         <template #header>
           <div class="block-head">
@@ -204,9 +237,18 @@ async function removeSpore(): Promise<void> {
           </el-table-column>
           <el-table-column prop="confidence" label="置信度" width="90" />
           <el-table-column label="复核" width="110">
-            <template #default="{ row }: { row: { needReview: boolean; reviewer: string } }">
-              <el-tag v-if="row.needReview" type="warning" size="small" effect="dark">待复核</el-tag>
+            <template #default="{ row }: { row: IdentifyLog }">
+              <el-tag v-if="row.needReview || changesOf(row).length" type="warning" size="small" effect="dark">待复核</el-tag>
               <span v-else class="muted">{{ row.reviewer || '已复核' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="依据核对" min-width="230">
+            <template #default="{ row }: { row: IdentifyLog }">
+              <template v-if="changesOf(row).length">
+                <p v-for="change in changesOf(row)" :key="change.key" class="change-line">{{ formatChange(change) }}</p>
+                <el-button size="small" type="warning" plain @click="confirmLog(row)">复核确认</el-button>
+              </template>
+              <span v-else class="muted">与落论时一致</span>
             </template>
           </el-table-column>
         </el-table>
@@ -275,5 +317,10 @@ async function removeSpore(): Promise<void> {
   display: flex;
   gap: 8px;
   padding-left: 92px;
+}
+.change-line {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: #a45b1f;
 }
 </style>

@@ -19,6 +19,7 @@ import SporePrintSwatch from '@/components/common/SporePrintSwatch.vue'
 import TraitsSummary from '@/components/common/TraitsSummary.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { useCandidateMatch, EMPTY_CRITERIA, type MatchCriteria } from '@/hooks/useCandidateMatch'
+import { formatChange, snapshotChanges, type SnapshotChange } from '@/utils/identify'
 import { recordStore } from '@/stores/recordStore'
 import { sporeStore } from '@/stores/sporeStore'
 import { pointStore } from '@/stores/pointStore'
@@ -54,7 +55,8 @@ const visible = computed(() => {
       record,
       spore: sporeState.spores.find((item) => item.recordId === record.id) ?? null,
       percent: 0,
-      matched: [] as string[]
+      matched: [] as string[],
+      ident: identifyOf(record.id)
     }))
   }
   const text = keyword.value.trim().toLowerCase()
@@ -70,16 +72,39 @@ const visible = computed(() => {
       }
       return true
     })
-    .map((item) => ({ record: item.record, spore: item.spore, percent: item.percent, matched: item.matched }))
+    .map((item) => ({
+      record: item.record,
+      spore: item.spore,
+      percent: item.percent,
+      matched: item.matched,
+      ident: identifyOf(item.record.id)
+    }))
 })
 
 function pointName(pointId: string): string {
   return pointState.points.find((point) => point.id === pointId)?.name ?? '未关联采集点'
 }
 
-function identifyOf(recordId: string): { conclusion: string; confidence: string; needReview: boolean } | null {
+interface IdentInfo {
+  conclusion: string
+  confidence: string
+  needReview: boolean
+  /** 落论依据的观察值已变更：复核前不作为当前鉴定 */
+  stale: boolean
+  changes: SnapshotChange[]
+}
+
+function identifyOf(recordId: string): IdentInfo | null {
   const log = identifyState.logs.find((item) => item.recordId === recordId)
-  return log ? { conclusion: log.conclusion, confidence: log.confidence, needReview: log.needReview } : null
+  if (!log) return null
+  const changes = snapshotChanges(log, recordState.records, sporeState.spores)
+  return {
+    conclusion: log.conclusion,
+    confidence: log.confidence,
+    needReview: log.needReview,
+    stale: changes.length > 0,
+    changes
+  }
 }
 
 function toggleCompare(id: string): void {
@@ -251,14 +276,22 @@ async function removeRecord(record: FungusRecord): Promise<void> {
         </div>
         <TraitsSummary :record="item.record" :spore="item.spore" :default-open="['gill']" class="traits" />
         <div class="ident-line">
-          <template v-if="identifyOf(item.record.id)">
-            <el-tag type="success" size="small" effect="dark">
-              {{ identifyOf(item.record.id)?.conclusion }}
-            </el-tag>
-            <span class="muted">
-              置信度 {{ identifyOf(item.record.id)?.confidence }}
-              <template v-if="identifyOf(item.record.id)?.needReview"> · 待复核</template>
-            </span>
+          <template v-if="item.ident">
+            <template v-if="item.ident.stale">
+              <el-tag type="warning" size="small" effect="dark">待复核</el-tag>
+              <span class="muted">
+                旧结论 {{ item.ident.conclusion }} 依据已变更（{{ item.ident.changes.map(formatChange).join('；') }}），复核前不作当前鉴定
+              </span>
+            </template>
+            <template v-else>
+              <el-tag type="success" size="small" effect="dark">
+                {{ item.ident.conclusion }}
+              </el-tag>
+              <span class="muted">
+                置信度 {{ item.ident.confidence }}
+                <template v-if="item.ident.needReview"> · 待复核</template>
+              </span>
+            </template>
           </template>
           <el-tag v-else type="warning" size="small" effect="plain">尚无鉴定结论</el-tag>
           <el-tag v-if="item.percent > 0" size="small" effect="plain">匹配度 {{ item.percent }}%</el-tag>

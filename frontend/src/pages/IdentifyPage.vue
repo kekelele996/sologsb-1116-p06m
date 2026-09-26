@@ -17,6 +17,7 @@ import GillAttachmentTag from '@/components/common/GillAttachmentTag.vue'
 import SporePrintSwatch from '@/components/common/SporePrintSwatch.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { EMPTY_CRITERIA, useCandidateMatch, type MatchCriteria } from '@/hooks/useCandidateMatch'
+import { formatChange, snapshotChanges, snapshotOf, type SnapshotChange } from '@/utils/identify'
 import { recordStore } from '@/stores/recordStore'
 import { sporeStore } from '@/stores/sporeStore'
 import { identifyStore } from '@/stores/identifyStore'
@@ -96,7 +97,9 @@ async function saveLog(): Promise<void> {
     confidence: logForm.confidence,
     needReview: logForm.needReview,
     reviewer: logForm.reviewer.trim(),
-    date: new Date().toISOString().slice(0, 10)
+    date: new Date().toISOString().slice(0, 10),
+    // 落论时记住当时采用的形态 / 孢子印观察值，后续变更即可比对
+    snapshot: snapshotOf(active.value, sporeState.spores.find((item) => item.recordId === active.value?.id) ?? null)
   }
   await identifyStore.getState().save(log)
   ElMessage.success(`${active.value.code} 已记录结论：${log.conclusion}（${log.confidence}）`)
@@ -105,6 +108,15 @@ async function saveLog(): Promise<void> {
 
 const latestOf = (recordId: string): IdentifyLog | undefined =>
   identifyState.logs.find((item) => item.recordId === recordId)
+
+/** 某条目最新结论的依据变更项（空数组 = 观察值与落论时一致） */
+const changesOf = (recordId: string): SnapshotChange[] => {
+  const log = latestOf(recordId)
+  return log ? snapshotChanges(log, recordState.records, sporeState.spores) : []
+}
+
+/** 当前目标条目旧结论的依据变更（落新结论前给出提示） */
+const activeChanges = computed(() => (activeRecordId.value ? changesOf(activeRecordId.value) : []))
 </script>
 
 <template>
@@ -208,7 +220,10 @@ const latestOf = (recordId: string): IdentifyLog | undefined =>
                 >
                   以该条为结论草稿
                 </el-button>
-                <span v-if="latestOf(item.record.id)" class="muted">已有结论：{{ latestOf(item.record.id)?.conclusion }}</span>
+                <span v-if="latestOf(item.record.id)" class="muted">
+                  已有结论：{{ latestOf(item.record.id)?.conclusion }}
+                  <span v-if="changesOf(item.record.id).length" class="stale-mark">（依据已变更，待复核）</span>
+                </span>
                 <span v-else class="muted">尚无结论</span>
               </div>
             </button>
@@ -221,6 +236,15 @@ const latestOf = (recordId: string): IdentifyLog | undefined =>
             记录鉴定结论
             <span v-if="active" class="muted"> · 目标条目 {{ active.code }}（{{ pointName(active.pointId) }}）</span>
           </template>
+          <el-alert
+            v-if="active && activeChanges.length"
+            type="warning"
+            show-icon
+            :closable="false"
+            class="stale-alert"
+            :title="`旧结论「${latestOf(active.id)?.conclusion ?? ''}」的依据已变更：${activeChanges.map(formatChange).join('；')}`"
+            description="候选排序已按新观察值进行；重新保存结论前，旧结论不作为当前鉴定。"
+          />
           <el-form label-width="92px">
             <el-form-item label="结论学名" required>
               <el-input v-model="logForm.conclusion" placeholder="如 Lepista sordida" />
@@ -374,5 +398,11 @@ const latestOf = (recordId: string): IdentifyLog | undefined =>
 }
 .form-actions {
   padding-left: 92px;
+}
+.stale-mark {
+  color: #a45b1f;
+}
+.stale-alert {
+  margin-bottom: 12px;
 }
 </style>
