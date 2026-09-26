@@ -24,6 +24,7 @@ import { sporeStore } from '@/stores/sporeStore'
 import { pointStore } from '@/stores/pointStore'
 import { identifyStore } from '@/stores/identifyStore'
 import { uid } from '@/utils/id'
+import { basisChangesOf, formatBasisChanges } from '@/utils/identify'
 
 const router = useRouter()
 const recordState = useStore(recordStore)
@@ -47,6 +48,30 @@ const { candidates } = useCandidateMatch(
   criteria
 )
 
+/** 最新鉴定结论的展示状态；依据观察值已变化时标为待复核，不再当作当前鉴定 */
+interface IdentStatus {
+  conclusion: string
+  confidence: string
+  needReview: boolean
+  stale: boolean
+  changeText: string
+}
+
+function identStatus(recordId: string): IdentStatus | null {
+  const log = identifyState.logs.find((item) => item.recordId === recordId)
+  if (!log) return null
+  const record = recordState.records.find((item) => item.id === recordId) ?? null
+  const spore = sporeState.spores.find((item) => item.recordId === recordId) ?? null
+  const changes = basisChangesOf(log, record, spore)
+  return {
+    conclusion: log.conclusion,
+    confidence: log.confidence,
+    needReview: log.needReview,
+    stale: changes.length > 0,
+    changeText: formatBasisChanges(changes)
+  }
+}
+
 /** 图谱筛选：印色 + 着生方式 + 关键字（未设条件时按编号排序） */
 const visible = computed(() => {
   if (!filterAttachment.value && !filterColor.value && !keyword.value.trim()) {
@@ -54,7 +79,8 @@ const visible = computed(() => {
       record,
       spore: sporeState.spores.find((item) => item.recordId === record.id) ?? null,
       percent: 0,
-      matched: [] as string[]
+      matched: [] as string[],
+      ident: identStatus(record.id)
     }))
   }
   const text = keyword.value.trim().toLowerCase()
@@ -70,16 +96,17 @@ const visible = computed(() => {
       }
       return true
     })
-    .map((item) => ({ record: item.record, spore: item.spore, percent: item.percent, matched: item.matched }))
+    .map((item) => ({
+      record: item.record,
+      spore: item.spore,
+      percent: item.percent,
+      matched: item.matched,
+      ident: identStatus(item.record.id)
+    }))
 })
 
 function pointName(pointId: string): string {
   return pointState.points.find((point) => point.id === pointId)?.name ?? '未关联采集点'
-}
-
-function identifyOf(recordId: string): { conclusion: string; confidence: string; needReview: boolean } | null {
-  const log = identifyState.logs.find((item) => item.recordId === recordId)
-  return log ? { conclusion: log.conclusion, confidence: log.confidence, needReview: log.needReview } : null
 }
 
 function toggleCompare(id: string): void {
@@ -251,13 +278,17 @@ async function removeRecord(record: FungusRecord): Promise<void> {
         </div>
         <TraitsSummary :record="item.record" :spore="item.spore" :default-open="['gill']" class="traits" />
         <div class="ident-line">
-          <template v-if="identifyOf(item.record.id)">
-            <el-tag type="success" size="small" effect="dark">
-              {{ identifyOf(item.record.id)?.conclusion }}
+          <template v-if="item.ident">
+            <el-tag v-if="item.ident.stale" type="warning" size="small" effect="dark">
+              待复核 · {{ item.ident.conclusion }}
+            </el-tag>
+            <el-tag v-else type="success" size="small" effect="dark">
+              {{ item.ident.conclusion }}
             </el-tag>
             <span class="muted">
-              置信度 {{ identifyOf(item.record.id)?.confidence }}
-              <template v-if="identifyOf(item.record.id)?.needReview"> · 待复核</template>
+              置信度 {{ item.ident.confidence }}
+              <template v-if="item.ident.stale"> · 依据已变：{{ item.ident.changeText }}</template>
+              <template v-else-if="item.ident.needReview"> · 待复核</template>
             </span>
           </template>
           <el-tag v-else type="warning" size="small" effect="plain">尚无鉴定结论</el-tag>

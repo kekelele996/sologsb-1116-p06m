@@ -2,9 +2,10 @@ import { onUnmounted, reactive } from 'vue'
 import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
 import type { CollectPoint, FungusRecord, IdentifyLog, SporePrint } from '@/types'
+import { snapshotBasis } from '@/utils/identify'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
@@ -29,7 +30,7 @@ class FungiGuideDb extends Dexie {
       meta: 'key'
     })
     // v2：新增「菌肉变色反应」字段，迁移时为历史条目补齐默认值（不变色）
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         records: 'id, code, pointId, attachment, capShape',
         spores: 'id, recordId, color, observeDate',
@@ -47,6 +48,21 @@ class FungiGuideDb extends Dexie {
             }
           })
       })
+    // v3：鉴定结论新增「依据快照」，迁移时按当前条目形态与孢子印观察值补齐
+    this.version(SCHEMA_VERSION).upgrade(async (tx) => {
+      const records = await tx.table<FungusRecord, string>('records').toArray()
+      const spores = await tx.table<SporePrint, string>('spores').toArray()
+      await tx
+        .table<IdentifyLog, string>('identifies')
+        .toCollection()
+        .modify((log) => {
+          if (log.basisSnapshot) return
+          const record = records.find((item) => item.id === log.recordId)
+          if (!record) return
+          const spore = spores.find((item) => item.recordId === log.recordId) ?? null
+          log.basisSnapshot = snapshotBasis(record, spore)
+        })
+    })
   }
 }
 
@@ -116,7 +132,7 @@ export async function seedDemoData(): Promise<void> {
     }
   ])
 
-  await db.records.bulkPut([
+  const records: FungusRecord[] = [
     {
       id: 'rec_001',
       code: 'BHS-2026-001',
@@ -189,9 +205,10 @@ export async function seedDemoData(): Promise<void> {
       collector: '祁野',
       note: '生于倒木侧面，质地木栓化'
     }
-  ])
+  ]
+  await db.records.bulkPut(records)
 
-  await db.spores.bulkPut([
+  const spores: SporePrint[] = [
     {
       id: 'spo_001',
       recordId: 'rec_001',
@@ -219,7 +236,15 @@ export async function seedDemoData(): Promise<void> {
       observeDate: today,
       moisture: '木质化样本，印痕浅'
     }
-  ])
+  ]
+  await db.spores.bulkPut(spores)
+
+  /** 取某条目的当前观察值生成依据快照，保证示例结论与条目状态一致 */
+  const seedSnapshot = (recordId: string) => {
+    const record = records.find((item) => item.id === recordId)
+    if (!record) return undefined
+    return snapshotBasis(record, spores.find((item) => item.recordId === recordId) ?? null)
+  }
 
   await db.identifies.bulkPut([
     {
@@ -232,7 +257,8 @@ export async function seedDemoData(): Promise<void> {
       confidence: '低',
       needReview: true,
       reviewer: '祁野',
-      date: today
+      date: today,
+      basisSnapshot: seedSnapshot('rec_001')
     },
     {
       id: 'idf_002',
@@ -244,7 +270,8 @@ export async function seedDemoData(): Promise<void> {
       confidence: '中',
       needReview: false,
       reviewer: '祁野',
-      date: today
+      date: today,
+      basisSnapshot: seedSnapshot('rec_002')
     }
   ])
 }

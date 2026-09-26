@@ -2,7 +2,7 @@
 import { computed, reactive, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import type { CollectPoint, SporeColor, SporePrint } from '@/types'
+import type { CollectPoint, IdentifyLog, SporeColor, SporePrint } from '@/types'
 import { SPORE_COLORS } from '@/types'
 import GeoPointForm from '@/components/common/GeoPointForm.vue'
 import GillAttachmentTag from '@/components/common/GillAttachmentTag.vue'
@@ -14,6 +14,7 @@ import { sporeStore } from '@/stores/sporeStore'
 import { pointStore } from '@/stores/pointStore'
 import { identifyStore } from '@/stores/identifyStore'
 import { sporeColorHex } from '@/utils/spore'
+import { basisChangesOf, formatBasisChanges, snapshotBasis, type BasisChange } from '@/utils/identify'
 import { uid } from '@/utils/id'
 
 const route = useRoute()
@@ -26,6 +27,22 @@ const identifyState = useStore(identifyStore)
 const record = computed(() => recordState.records.find((item) => item.id === route.params.id) ?? null)
 const spore = computed(() => sporeState.spores.find((item) => item.recordId === record.value?.id) ?? null)
 const logs = computed(() => identifyState.logs.filter((item) => item.recordId === record.value?.id))
+
+/** 鉴定留痕行：结论 + 相对当前观察值的依据变化项 */
+interface LogRow {
+  log: IdentifyLog
+  changes: BasisChange[]
+  stale: boolean
+}
+
+const logRows = computed<LogRow[]>(() =>
+  logs.value.map((log) => {
+    const changes = basisChangesOf(log, record.value, spore.value)
+    return { log, changes, stale: changes.length > 0 }
+  })
+)
+/** 最新一条结论（留痕按日期倒序，第一条即当前结论） */
+const latestRow = computed(() => logRows.value[0] ?? null)
 /** 当前条目所属采集点名称（在脚本内取，避免模板内箭头函数丢失空值收窄） */
 const recordPointName = computed(() => {
   const current = record.value
@@ -104,6 +121,16 @@ async function removeSpore(): Promise<void> {
   await sporeStore.getState().remove(sporeForm.id)
   sporeForm.id = ''
   ElMessage.success('孢子印记录已删除')
+}
+
+/** 重新确认：以当前形态/孢子印观察值为准重新落依据快照，结论恢复为当前鉴定 */
+async function reconfirmLog(log: IdentifyLog): Promise<void> {
+  if (!record.value) return
+  await identifyStore.getState().save({
+    ...log,
+    basisSnapshot: snapshotBasis(record.value, spore.value)
+  })
+  ElMessage.success(`已按当前观察值重新确认结论：${log.conclusion}`)
 }
 </script>
 
@@ -193,20 +220,51 @@ async function removeSpore(): Promise<void> {
 
       <el-card shadow="never" class="block">
         <template #header>鉴定留痕（{{ logs.length }} 条）</template>
-        <el-table :data="logs" border stripe>
-          <el-table-column prop="date" label="日期" width="120" />
-          <el-table-column prop="conclusion" label="结论学名" min-width="160" />
-          <el-table-column prop="basis" label="依据" width="110" />
-          <el-table-column label="参考图鉴" min-width="180">
-            <template #default="{ row }: { row: { referenceBook: string; referencePage: string } }">
-              {{ row.referenceBook || '—' }} {{ row.referencePage }}
+        <el-alert
+          v-if="latestRow?.stale"
+          type="warning"
+          show-icon
+          :closable="false"
+          class="stale-alert"
+          :title="`最新结论「${latestRow.log.conclusion}」的依据观察值已变化，重新确认前不作为当前鉴定`"
+          :description="`变化项：${formatBasisChanges(latestRow.changes)}`"
+        />
+        <el-table :data="logRows" border stripe>
+          <el-table-column label="日期" width="120">
+            <template #default="{ row }: { row: LogRow }">{{ row.log.date }}</template>
+          </el-table-column>
+          <el-table-column label="结论学名" min-width="150">
+            <template #default="{ row }: { row: LogRow }">{{ row.log.conclusion }}</template>
+          </el-table-column>
+          <el-table-column label="依据" width="110">
+            <template #default="{ row }: { row: LogRow }">{{ row.log.basis }}</template>
+          </el-table-column>
+          <el-table-column label="参考图鉴" min-width="160">
+            <template #default="{ row }: { row: LogRow }">
+              {{ row.log.referenceBook || '—' }} {{ row.log.referencePage }}
             </template>
           </el-table-column>
-          <el-table-column prop="confidence" label="置信度" width="90" />
-          <el-table-column label="复核" width="110">
-            <template #default="{ row }: { row: { needReview: boolean; reviewer: string } }">
-              <el-tag v-if="row.needReview" type="warning" size="small" effect="dark">待复核</el-tag>
-              <span v-else class="muted">{{ row.reviewer || '已复核' }}</span>
+          <el-table-column label="置信度" width="90">
+            <template #default="{ row }: { row: LogRow }">{{ row.log.confidence }}</template>
+          </el-table-column>
+          <el-table-column label="复核" width="130">
+            <template #default="{ row }: { row: LogRow }">
+              <el-tag v-if="row.stale" type="warning" size="small" effect="dark">待复核·依据已变</el-tag>
+              <el-tag v-else-if="row.log.needReview" type="warning" size="small" effect="dark">待复核</el-tag>
+              <span v-else class="muted">{{ row.log.reviewer || '已复核' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="依据核对" min-width="200">
+            <template #default="{ row }: { row: LogRow }">
+              <span v-if="row.stale" class="stale-text">{{ formatBasisChanges(row.changes) }}</span>
+              <span v-else class="muted">与落结论时一致</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="150">
+            <template #default="{ row }: { row: LogRow }">
+              <el-button v-if="row.stale" size="small" type="primary" plain @click="reconfirmLog(row.log)">
+                按当前观察值确认
+              </el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -238,6 +296,13 @@ async function removeSpore(): Promise<void> {
   background: #f7f5f0;
   font-size: 12px;
   color: #6f7d72;
+}
+.stale-alert {
+  margin-bottom: 12px;
+}
+.stale-text {
+  font-size: 12px;
+  color: #a45b1f;
 }
 .spore-body {
   display: flex;

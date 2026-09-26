@@ -22,6 +22,7 @@ import { sporeStore } from '@/stores/sporeStore'
 import { identifyStore } from '@/stores/identifyStore'
 import { pointStore } from '@/stores/pointStore'
 import { uid } from '@/utils/id'
+import { basisChangeLabels, basisChangesOf, snapshotBasis } from '@/utils/identify'
 
 const recordState = useStore(recordStore)
 const sporeState = useStore(sporeStore)
@@ -37,6 +38,9 @@ const { candidates, hasCondition } = useCandidateMatch(
 
 const activeRecordId = ref('')
 const active = computed(() => recordState.records.find((item) => item.id === activeRecordId.value) ?? null)
+const activeSpore = computed(
+  () => sporeState.spores.find((item) => item.recordId === activeRecordId.value) ?? null
+)
 
 const logForm = reactive({
   conclusion: '',
@@ -96,15 +100,26 @@ async function saveLog(): Promise<void> {
     confidence: logForm.confidence,
     needReview: logForm.needReview,
     reviewer: logForm.reviewer.trim(),
-    date: new Date().toISOString().slice(0, 10)
+    date: new Date().toISOString().slice(0, 10),
+    // 落结论时留存当时的形态/孢子印观察值，之后观察值变动可据此标记待复核
+    basisSnapshot: snapshotBasis(active.value, activeSpore.value)
   }
   await identifyStore.getState().save(log)
   ElMessage.success(`${active.value.code} 已记录结论：${log.conclusion}（${log.confidence}）`)
   logForm.conclusion = ''
 }
 
-const latestOf = (recordId: string): IdentifyLog | undefined =>
-  identifyState.logs.find((item) => item.recordId === recordId)
+/** 候选条目最新结论及其依据是否已随观察值变化 */
+function latestStatusOf(
+  recordId: string
+): { conclusion: string; stale: boolean; changeText: string } | null {
+  const log = identifyState.logs.find((item) => item.recordId === recordId)
+  if (!log) return null
+  const record = recordState.records.find((item) => item.id === recordId) ?? null
+  const spore = sporeState.spores.find((item) => item.recordId === recordId) ?? null
+  const changes = basisChangesOf(log, record, spore)
+  return { conclusion: log.conclusion, stale: changes.length > 0, changeText: basisChangeLabels(changes) }
+}
 </script>
 
 <template>
@@ -208,7 +223,12 @@ const latestOf = (recordId: string): IdentifyLog | undefined =>
                 >
                   以该条为结论草稿
                 </el-button>
-                <span v-if="latestOf(item.record.id)" class="muted">已有结论：{{ latestOf(item.record.id)?.conclusion }}</span>
+                <span v-if="latestStatusOf(item.record.id)" class="muted">
+                  已有结论：{{ latestStatusOf(item.record.id)?.conclusion }}
+                  <template v-if="latestStatusOf(item.record.id)?.stale">
+                    <span class="stale-hint">（依据已变：{{ latestStatusOf(item.record.id)?.changeText }}，待复核）</span>
+                  </template>
+                </span>
                 <span v-else class="muted">尚无结论</span>
               </div>
             </button>
@@ -355,6 +375,9 @@ const latestOf = (recordId: string): IdentifyLog | undefined =>
 }
 .miss {
   color: #a45b1f;
+}
+.stale-hint {
+  color: #c97a1a;
 }
 .candidate-actions {
   display: flex;
